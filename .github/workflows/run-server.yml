@@ -1,0 +1,137 @@
+name: Run Guide API Server
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
+
+concurrency:
+  group: run-server
+  cancel-in-progress: true
+
+jobs:
+  run-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Cleanup old runs
+        env:
+          GH_TOKEN: ${{ secrets.APISERVERGUIDE }}
+          OWNER: huydepayqiu119-cpu
+          REPO: github-server-api-guide-app
+        run: |
+          curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$OWNER/$REPO/actions/workflows/run-server.yml/runs?status=completed&per_page=100" \
+            | python3 -c "import json,sys; [print(r['id']) for r in json.load(sys.stdin).get('workflow_runs',[])]" \
+            | while read id; do
+              curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/$OWNER/$REPO/actions/runs/$id" > /dev/null && echo "Deleted $id"
+            done
+
+      - uses: actions/checkout@v4
+        with:
+          repository: huydepayqiu119-cpu/server-api-guide-app
+          token: ${{ secrets.APISERVERGUIDE }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm install > /dev/null 2>&1
+
+      - name: Install ngrok
+        run: |
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null 2>&1
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list >/dev/null
+          sudo apt-get update -qq > /dev/null 2>&1 && sudo apt-get install -y ngrok > /dev/null 2>&1
+
+      - name: Start server, ngrok and stream logs
+        env:
+          PORT: 25566
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ secrets.APISERVERGUIDE }}
+          OWNER: huydepayqiu119-cpu
+          REPO: github-server-api-guide-app
+        run: |
+          tg_json() {
+            curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":\"$TELEGRAM_CHAT_ID\",\"parse_mode\":\"HTML\",\"text\":$(echo "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" > /dev/null 2>&1
+          }
+
+          node index.js > /tmp/server.log 2>&1 &
+          SERVER_PID=$!
+
+          for i in $(seq 1 15); do
+            curl -s http://localhost:25566/health > /dev/null 2>&1 && break
+            sleep 2
+          done
+
+          if ! curl -s http://localhost:25566/health > /dev/null 2>&1; then
+            tg_json "❌ <b>[Guide API] Server failed!</b>&#10;<code>$(tail -20 /tmp/server.log)</code>"
+            exit 1
+          fi
+
+          ngrok config add-authtoken "$NGROK_TOKEN" > /dev/null 2>&1
+          ngrok http 25566 > /tmp/ngrok.log 2>&1 &
+
+          for i in $(seq 1 30); do
+            NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url' 2>/dev/null)
+            [ -n "$NGROK_URL" ] && [ "$NGROK_URL" != "null" ] && break
+            sleep 2
+          done
+
+          if [ -z "$NGROK_URL" ] || [ "$NGROK_URL" = "null" ]; then
+            tg_json "❌ <b>[Guide API] Ngrok failed!</b>&#10;<code>$(tail -10 /tmp/ngrok.log)</code>"
+            exit 1
+          fi
+
+          FILE_SHA=$(curl -s \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/$OWNER/$REPO/contents/ip.txt \
+            | jq -r '.sha // empty')
+
+          SHA_FIELD=""
+          [ -n "$FILE_SHA" ] && SHA_FIELD=",\"sha\":\"$FILE_SHA\""
+
+          curl -s -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/$OWNER/$REPO/contents/ip.txt \
+            -d "{\"message\":\"update url: $NGROK_URL\",\"content\":\"$(echo -n "$NGROK_URL" | base64 -w 0)\"$SHA_FIELD}" > /dev/null 2>&1
+
+          EARLY_LOG=$(cat /tmp/server.log | head -c 3000)
+          tg_json "🌐 <b>[Guide API] $NGROK_URL</b>&#10;⏰ $(date '+%Y-%m-%d %H:%M:%S UTC')&#10;&#10;<code>$EARLY_LOG</code>"
+          echo "Tunnel URL: $NGROK_URL"
+
+          LAST_LINE=$(wc -l < /tmp/server.log)
+          LAST_PING=$(date +%s)
+          START_TIME=$(date +%s)
+          MAX_DURATION=$((5 * 60 * 60 + 20 * 60))
+
+          while true; do
+            sleep 10
+            NOW=$(date +%s)
+            [ $((NOW - START_TIME)) -ge $MAX_DURATION ] && break
+
+            CURRENT_LINE=$(wc -l < /tmp/server.log)
+            if [ "$CURRENT_LINE" -gt "$LAST_LINE" ]; then
+              NEW_LINES=$(sed -n "$((LAST_LINE + 1)),${CURRENT_LINE}p" /tmp/server.log)
+              LAST_LINE=$CURRENT_LINE
+              tg_json "<code>$(echo "$NEW_LINES" | head -c 3500)</code>"
+            fi
+
+            if [ $((NOW - LAST_PING)) -ge 1800 ]; then
+              UPTIME=$(ps -p $SERVER_PID -o etime= 2>/dev/null || echo "unknown")
+              tg_json "💓 <b>[Guide API] Still running</b>&#10;Uptime: $UPTIME&#10;URL: <code>$NGROK_URL</code>"
+              LAST_PING=$NOW
+            fi
+
+            kill -0 $SERVER_PID 2>/dev/null || { tg_json "💀 <b>[Guide API] Server process died!</b>"; exit 1; }
+          done
