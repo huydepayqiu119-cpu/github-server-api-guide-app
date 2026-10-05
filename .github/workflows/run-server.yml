@@ -17,15 +17,15 @@ jobs:
     steps:
       - name: Cleanup old runs
         env:
-          GH_TOKEN: ${{ secrets.APISERVERGUIDE }}
+          GITHUB_TOKEN: ${{ secrets.APISERVERGUIDE }}
           OWNER: huydepayqiu119-cpu
           REPO: github-server-api-guide-app
         run: |
-          curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" \
+          curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/$OWNER/$REPO/actions/workflows/run-server.yml/runs?status=completed&per_page=100" \
             | python3 -c "import json,sys; [print(r['id']) for r in json.load(sys.stdin).get('workflow_runs',[])]" \
             | while read id; do
-              curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" \
+              curl -s -X DELETE -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" \
                 "https://api.github.com/repos/$OWNER/$REPO/actions/runs/$id" > /dev/null && echo "Deleted $id"
             done
 
@@ -55,7 +55,6 @@ jobs:
           NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GH_TOKEN: ${{ secrets.APISERVERGUIDE }}
           OWNER: huydepayqiu119-cpu
           REPO: github-server-api-guide-app
         run: |
@@ -93,7 +92,7 @@ jobs:
           fi
 
           FILE_SHA=$(curl -s \
-            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/$OWNER/$REPO/contents/ip.txt \
             | jq -r '.sha // empty')
@@ -102,7 +101,7 @@ jobs:
           [ -n "$FILE_SHA" ] && SHA_FIELD=",\"sha\":\"$FILE_SHA\""
 
           curl -s -X PUT \
-            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/$OWNER/$REPO/contents/ip.txt \
             -d "{\"message\":\"update url: $NGROK_URL\",\"content\":\"$(echo -n "$NGROK_URL" | base64 -w 0)\"$SHA_FIELD}" > /dev/null 2>&1
